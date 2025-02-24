@@ -21,21 +21,14 @@ import (
 	"go/types"
 	"log"
 	"math/big"
-	"reflect"
 	"strconv"
 
+	"github.com/goplus/gogen"
 	"github.com/goplus/gop/ast"
 	"github.com/goplus/gop/token"
-	"github.com/goplus/gox"
 )
 
 // -----------------------------------------------------------------------------
-
-func toFuncType(ctx *blockCtx, typ *ast.FuncType, recv *types.Var) *types.Signature {
-	params, variadic := toParams(ctx, typ.Params.List)
-	results := toResults(ctx, typ.Results)
-	return types.NewSignature(recv, params, results, variadic)
-}
 
 func toRecv(ctx *blockCtx, recv *ast.FieldList) *types.Var {
 	v := recv.List[0]
@@ -43,20 +36,33 @@ func toRecv(ctx *blockCtx, recv *ast.FieldList) *types.Var {
 	if len(v.Names) > 0 {
 		name = v.Names[0].Name
 	}
-	return ctx.pkg.NewParam(v.Pos(), name, toType(ctx, v.Type))
+	typ, star, _ := getRecvType(v.Type)
+	id, ok := typ.(*ast.Ident)
+	if !ok {
+		panic("TODO: getRecvType")
+	}
+	t := toIdentType(ctx, id)
+	if star {
+		t = types.NewPointer(t)
+	}
+	ret := ctx.pkg.NewParam(v.Pos(), name, t)
+	if rec := ctx.recorder(); rec != nil {
+		dRecv := recv.List[0]
+		if names := dRecv.Names; len(names) == 1 {
+			rec.Def(names[0], ret)
+		}
+	}
+	return ret
 }
 
 func getRecvTypeName(ctx *pkgCtx, recv *ast.FieldList, handleErr bool) (string, bool) {
-	typ := recv.List[0].Type
-	if t, ok := typ.(*ast.StarExpr); ok {
-		typ = t.X
-	}
+	typ, _, _ := getRecvType(recv.List[0].Type)
 	if t, ok := typ.(*ast.Ident); ok {
 		return t.Name, true
 	}
 	if handleErr {
-		src, pos := ctx.LoadExpr(typ)
-		ctx.handleCodeErrorf(&pos, "invalid receiver type %v (%v is not a defined type)", src, src)
+		src := ctx.LoadExpr(typ)
+		ctx.handleErrorf(typ.Pos(), "invalid receiver type %v (%v is not a defined type)", src, src)
 	}
 	return "", false
 }
@@ -87,24 +93,53 @@ func toParams(ctx *blockCtx, flds []*ast.Field) (typ *types.Tuple, variadic bool
 	return types.NewTuple(args...), ok
 }
 
-func toParam(ctx *blockCtx, fld *ast.Field, args []*gox.Param) []*gox.Param {
+func toParam(ctx *blockCtx, fld *ast.Field, args []*gogen.Param) []*gogen.Param {
 	typ := toType(ctx, fld.Type)
 	pkg := ctx.pkg
 	if len(fld.Names) == 0 {
 		return append(args, pkg.NewParam(fld.Pos(), "", typ))
 	}
 	for _, name := range fld.Names {
-		args = append(args, pkg.NewParam(name.Pos(), name.Name, typ))
+		param := pkg.NewParam(name.Pos(), name.Name, typ)
+		args = append(args, param)
+		if rec := ctx.recorder(); rec != nil {
+			rec.Def(name, param)
+		}
 	}
 	return args
 }
 
 // -----------------------------------------------------------------------------
 
-func toType(ctx *blockCtx, typ ast.Expr) types.Type {
+func toType(ctx *blockCtx, typ ast.Expr) (t types.Type) {
+	if rec := ctx.recorder(); rec != nil {
+		defer func() {
+			rec.recordType(typ, t)
+		}()
+	}
 	switch v := typ.(type) {
 	case *ast.Ident:
-		return toIdentType(ctx, v)
+		ctx.idents = append(ctx.idents, v)
+		defer func() {
+			ctx.idents = ctx.idents[:len(ctx.idents)-1]
+		}()
+		typ := toIdentType(ctx, v)
+		if ctx.inInst == 0 {
+			if t, ok := typ.(*types.Named); ok {
+				if namedIsTypeParams(ctx, t) {
+					pos := ctx.idents[0].Pos()
+					for _, i := range ctx.idents {
+						if i.Name == v.Name {
+							pos = i.Pos()
+							break
+						}
+					}
+					ctx.handleErrorf(pos, "cannot use generic type %v without instantiation", t.Obj().Type())
+					return types.Typ[types.Invalid]
+				}
+			}
+		}
+		return typ
 	case *ast.StarExpr:
 		elem := toType(ctx, v.X)
 		return types.NewPointer(elem)
@@ -122,14 +157,31 @@ func toType(ctx *blockCtx, typ ast.Expr) types.Type {
 	case *ast.ChanType:
 		return toChanType(ctx, v)
 	case *ast.FuncType:
-		return toFuncType(ctx, v, nil)
+		return toFuncType(ctx, v, nil, nil)
 	case *ast.SelectorExpr:
-		return toExternalType(ctx, v)
+		typ := toExternalType(ctx, v)
+		if ctx.inInst == 0 {
+			if t, ok := typ.(*types.Named); ok {
+				if namedIsTypeParams(ctx, t) {
+					panic(ctx.newCodeErrorf(v.Pos(), "cannot use generic type %v without instantiation", t.Obj().Type()))
+				}
+			}
+		}
+		return typ
 	case *ast.ParenExpr:
 		return toType(ctx, v.X)
+	case *ast.BinaryExpr:
+		return toBinaryExprType(ctx, v)
+	case *ast.UnaryExpr:
+		return toUnaryExprType(ctx, v)
+	case *ast.IndexExpr:
+		return toIndexType(ctx, v)
+	case *ast.IndexListExpr:
+		return toIndexListType(ctx, v)
+	default:
+		ctx.handleErrorf(v.Pos(), "toType unexpected: %T", v)
+		return types.Typ[types.Invalid]
 	}
-	log.Panicln("toType: unknown -", reflect.TypeOf(typ))
-	return nil
 }
 
 var (
@@ -145,15 +197,25 @@ func toChanType(ctx *blockCtx, v *ast.ChanType) *types.Chan {
 }
 
 func toExternalType(ctx *blockCtx, v *ast.SelectorExpr) types.Type {
-	name := v.X.(*ast.Ident).Name
-	if pr, ok := ctx.findImport(name); ok {
-		o := pr.TryRef(v.Sel.Name)
+	id := v.X.(*ast.Ident)
+	name := id.Name
+	if pi, ok := ctx.findImport(name); ok {
+		rec := ctx.recorder()
+		if rec != nil {
+			rec.Use(id, pi.pkgName)
+		}
+		o := pi.TryRef(v.Sel.Name)
 		if t, ok := o.(*types.TypeName); ok {
+			if rec != nil {
+				rec.Use(v.Sel, t)
+			}
 			return t.Type()
 		}
-		panic(ctx.newCodeErrorf(v.Pos(), "%s.%s is not a type", name, v.Sel.Name))
+		ctx.handleErrorf(v.Pos(), "%s.%s is not a type", name, v.Sel.Name)
+	} else {
+		ctx.handleErrorf(v.Pos(), "undefined: %s", name)
 	}
-	panic(ctx.newCodeErrorf(v.Pos(), "undefined: %s", name))
+	return types.Typ[types.Invalid]
 }
 
 /*-----------------------------------------------------------------------------
@@ -165,20 +227,38 @@ Name context:
 
 // ---------------------------------------------------------------------------*/
 
-func toIdentType(ctx *blockCtx, ident *ast.Ident) types.Type {
+func toIdentType(ctx *blockCtx, ident *ast.Ident) (ret types.Type) {
+	var obj types.Object
+	if rec := ctx.recorder(); rec != nil {
+		defer func() {
+			if obj != nil {
+				rec.recordIdent(ident, obj)
+			}
+		}()
+	}
+	if ctx.tlookup != nil {
+		if typ := ctx.tlookup.Lookup(ident.Name); typ != nil {
+			obj = typ.Obj()
+			return typ
+		}
+	}
 	v, builtin := lookupType(ctx, ident.Name)
 	if isBuiltin(builtin) {
-		panic(ctx.newCodeErrorf(ident.Pos(), "use of builtin %s not in function call", ident.Name))
+		ctx.handleErrorf(ident.Pos(), "use of builtin %s not in function call", ident.Name)
+		return types.Typ[types.Invalid]
 	}
 	if t, ok := v.(*types.TypeName); ok {
+		obj = t
 		return t.Type()
 	}
-	if v, _ := lookupPkgRef(ctx, nil, ident, objPkgRef); v != nil {
+	if v, _ := lookupPkgRef(ctx, gogen.PkgRef{}, ident, objPkgRef); v != nil {
 		if t, ok := v.(*types.TypeName); ok {
+			obj = t
 			return t.Type()
 		}
 	}
-	panic(ctx.newCodeErrorf(ident.Pos(), "%s is not a type", ident.Name))
+	ctx.handleErrorf(ident.Pos(), "%s is not a type", ident.Name)
+	return types.Typ[types.Invalid]
 }
 
 // TODO: optimization
@@ -204,47 +284,66 @@ func lookupType(ctx *blockCtx, name string) (types.Object, types.Object) {
 	return o, o
 }
 
+type checkRedecl struct {
+	// ctx *blockCtx
+	names map[string]token.Pos
+}
+
+func newCheckRedecl() *checkRedecl {
+	p := &checkRedecl{names: make(map[string]token.Pos)}
+	return p
+}
+
+func (p *checkRedecl) chkRedecl(ctx *blockCtx, name string, pos token.Pos) bool {
+	if name == "_" {
+		return false
+	}
+	if opos, ok := p.names[name]; ok {
+		ctx.handleErrorf(
+			pos, "%v redeclared\n\t%v other declaration of %v",
+			name, ctx.Position(opos), name)
+		return true
+	}
+	p.names[name] = pos
+	return false
+}
+
 func toStructType(ctx *blockCtx, v *ast.StructType) *types.Struct {
 	pkg := ctx.pkg.Types
 	fieldList := v.Fields.List
 	fields := make([]*types.Var, 0, len(fieldList))
 	tags := make([]string, 0, len(fieldList))
-	names := make(map[string]token.Pos)
-	chkRedecl := func(name string, pos token.Pos) bool {
-		if name == "_" {
-			return false
-		}
-		if opos, ok := names[name]; ok {
-			npos := ctx.Position(pos)
-			ctx.handleCodeErrorf(&npos, "%v redeclared\n\t%v other declaration of %v",
-				name, ctx.Position(opos), name)
-			return true
-		}
-		names[name] = pos
-		return false
-	}
+	chk := newCheckRedecl()
+	rec := ctx.recorder()
 	for _, field := range fieldList {
 		typ := toType(ctx, field.Type)
-		if field.Names == nil { // embedded
+		if len(field.Names) == 0 { // embedded
 			name := getTypeName(typ)
-			if chkRedecl(name, field.Type.Pos()) {
+			if chk.chkRedecl(ctx, name, field.Type.Pos()) {
 				continue
 			}
 			if t, ok := typ.(*types.Named); ok { // #1196: embedded type should ensure loaded
 				ctx.loadNamed(ctx.pkg, t)
 			}
-			fld := types.NewField(token.NoPos, pkg, name, typ, true)
+			ident := parseTypeEmbedName(field.Type)
+			fld := types.NewField(ident.NamePos, pkg, name, typ, true)
 			fields = append(fields, fld)
 			tags = append(tags, toFieldTag(field.Tag))
+			if rec != nil {
+				rec.Def(ident, fld)
+			}
 			continue
 		}
 		for _, name := range field.Names {
-			if chkRedecl(name.Name, name.NamePos) {
+			if chk.chkRedecl(ctx, name.Name, name.NamePos) {
 				continue
 			}
-			fld := types.NewField(token.NoPos, pkg, name.Name, typ, false)
+			fld := types.NewField(name.NamePos, pkg, name.Name, typ, false)
 			fields = append(fields, fld)
 			tags = append(tags, toFieldTag(field.Tag))
+			if rec != nil {
+				rec.Def(name, fld)
+			}
 		}
 	}
 	return types.NewStruct(fields, tags)
@@ -305,8 +404,8 @@ func toInt64(ctx *blockCtx, e ast.Expr, emsg string) int64 {
 			return v
 		}
 	}
-	src, pos := ctx.LoadExpr(e)
-	panic(newCodeErrorf(&pos, emsg, src))
+	src := ctx.LoadExpr(e)
+	panic(ctx.newCodeErrorf(e.Pos(), emsg, src))
 }
 
 func toInterfaceType(ctx *blockCtx, v *ast.InterfaceType) types.Type {
@@ -314,11 +413,12 @@ func toInterfaceType(ctx *blockCtx, v *ast.InterfaceType) types.Type {
 	if methodsList == nil {
 		return types.NewInterfaceType(nil, nil)
 	}
+	var rec = ctx.recorder()
 	var pkg = ctx.pkg.Types
 	var methods []*types.Func
 	var embeddeds []types.Type
 	for _, m := range methodsList {
-		if m.Names == nil { // embedded
+		if len(m.Names) == 0 { // embedded
 			typ := toType(ctx, m.Type)
 			if t, ok := typ.(*types.Named); ok { // #1198: embedded type should ensure loaded
 				ctx.loadNamed(ctx.pkg, t)
@@ -326,12 +426,42 @@ func toInterfaceType(ctx *blockCtx, v *ast.InterfaceType) types.Type {
 			embeddeds = append(embeddeds, typ)
 			continue
 		}
-		name := m.Names[0].Name
-		sig := toFuncType(ctx, m.Type.(*ast.FuncType), nil)
-		methods = append(methods, types.NewFunc(token.NoPos, pkg, name, sig))
+		name := m.Names[0]
+		sig := toFuncType(ctx, m.Type.(*ast.FuncType), nil, nil)
+		mthd := types.NewFunc(name.NamePos, pkg, name.Name, sig)
+		methods = append(methods, mthd)
+		if rec != nil {
+			rec.Def(name, mthd)
+		}
 	}
 	intf := types.NewInterfaceType(methods, embeddeds).Complete()
 	return intf
+}
+
+func instantiate(ctx *blockCtx, exprX ast.Expr, indices ...ast.Expr) types.Type {
+	ctx.inInst++
+	defer func() {
+		ctx.inInst--
+	}()
+
+	x := toType(ctx, exprX)
+	idx := make([]types.Type, len(indices))
+	for i, index := range indices {
+		idx[i] = toType(ctx, index)
+	}
+	typ := ctx.pkg.Instantiate(x, idx, exprX)
+	if rec := ctx.recorder(); rec != nil {
+		rec.instantiate(exprX, x, typ)
+	}
+	return typ
+}
+
+func toIndexType(ctx *blockCtx, v *ast.IndexExpr) types.Type {
+	return instantiate(ctx, v.X, v.Index)
+}
+
+func toIndexListType(ctx *blockCtx, v *ast.IndexListExpr) types.Type {
+	return instantiate(ctx, v.X, v.Indices...)
 }
 
 // -----------------------------------------------------------------------------

@@ -1,0 +1,127 @@
+import (
+	"bytes"
+	"go/ast"
+	"go/format"
+	"go/token"
+	"gop/ast/gopq"
+	"gop/parser"
+	"os"
+)
+
+type builtinTI struct {
+	Methods []builtin
+}
+
+var (
+	Builtins []builtin
+	Types    []*builtinTI
+)
+
+func gen() []byte {
+	f := &ast.File{
+		Name:  ast.newIdent("builtin"),
+		Decls: make([]ast.Decl, 0, 128),
+	}
+	f.Decls <- &ast.GenDecl{
+		Tok: token.IMPORT,
+		Specs: []ast.Spec{
+			importSpec("gop/builtin"),
+			importSpec("gop/builtin/iox"),
+			importSpec("io"),
+			importSpec("os"),
+			importSpec("reflect"),
+		},
+	}
+	genDecls f
+	b := new(bytes.Buffer)
+	format.node! b, fset, f
+	return format.source(b.bytes)!
+}
+
+func genDecls(f *ast.File) {
+	for built <- Builtins {
+		f.Decls <- built.genAST()
+	}
+	for t <- Types {
+		mthds := t.Methods
+		for m <- mthds {
+			f.Decls <- m.genMethodAST(mthds)
+		}
+	}
+}
+
+func initBuiltinTIs(fn gopq.NodeSet) (tistr *builtinTI) {
+	ti := fn.body.any.assignStmt.rhs(0).x.compositeLit("BuiltinTI")
+	methods := ti.elt("methods").cache
+	for method <- methods {
+		aTI := &builtinTI{}
+		for item <- method.elt {
+			mthd := item.elt(0).unquotedString!
+			fn := item.elt(1).one
+			if ref := fn.callExpr.one; ref.ok {
+				pkg := ref.fun.x.ident!
+				name := ref.arg(0).unquotedString!
+				aTI.Methods <- builtin{mthd, {pkg, name}}
+			} else {
+				name := fn.ident!
+				aTI.Methods <- builtin{mthd, {"", name}}
+			}
+		}
+		Types <- aTI
+		if len(aTI.Methods) > 10 {
+			tistr = aTI
+		}
+	}
+	return
+}
+
+func newBuiltinDefault(fn gopq.NodeSet, tistr *builtinTI) {
+	methods := fn.body.any.exprStmt.x.callExpr("ti.AddMethods").cache
+	for method <- methods {
+		aTI := &builtinTI{}
+		for arg <- method.varg(0).x {
+			mthd := arg.elt("Name").unquotedString!
+			ref := arg.elt("Fn").callExpr.one
+			pkg := ref.fun.x.ident!
+			name := ref.arg(0).unquotedString!
+			if pkg == "strx" {
+				tistr.Methods <- builtin{mthd, {pkg, name}}
+			} else {
+				aTI.Methods <- builtin{mthd, {pkg, name}}
+			}
+		}
+		if len(aTI.Methods) > 0 {
+			Types <- aTI
+		}
+	}
+}
+
+func initBuiltin(fn gopq.NodeSet) {
+	stmt := fn.body.any.exprStmt.x.cache
+	item := stmt.callExpr("scope.Insert").arg(0).cache
+	for call <- item.callExpr("gogen.NewOverloadFunc") {
+		built := call.arg(2).unquotedString!
+		ref := call.arg(3).callExpr.one
+		pkg := ref.fun.x.ident!
+		name := ref.arg(0).unquotedString!
+		Builtins <- builtin{built, {pkg, name}}
+	}
+	for call <- stmt.callExpr("initBuiltinFns") {
+		pkg := call.arg(2).ident!
+		builtins := call.arg(3).unquotedStringElts!
+		for built <- builtins {
+			Builtins <- builtin{built, {pkg, built.capitalize}}
+		}
+	}
+}
+
+fns := gopq.fromFile(fset, "${root}/../gogen/builtin.go", nil, parser.ParseComments)!.funcs
+tistr := initBuiltinTIs(fns.funcDecl("initBuiltinTIs").one)
+
+fns = gopq.fromFile(fset, "${root}/cl/builtin.go", nil, parser.ParseComments)!.funcs
+initBuiltin fns.funcDecl("initBuiltin").one
+newBuiltinDefault fns.funcDecl("newBuiltinDefault").one, tistr
+
+b := gen()
+os.Stdout.write b
+os.writeFile "${root}/builtin/doc/builtin.gop", b, 0777
