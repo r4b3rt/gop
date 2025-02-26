@@ -168,6 +168,11 @@ func formatSliceExpr(ctx *formatCtx, v *ast.SliceExpr) {
 func formatCallExpr(ctx *formatCtx, v *ast.CallExpr) {
 	formatExpr(ctx, v.Fun, &v.Fun)
 	fncallStartingLowerCase(v)
+	for i, arg := range v.Args {
+		if fn, ok := arg.(*ast.FuncLit); ok {
+			funcLitToLambdaExpr(fn, &v.Args[i])
+		}
+	}
 	formatExprs(ctx, v.Args)
 }
 
@@ -243,7 +248,9 @@ func formatStmt(ctx *formatCtx, stmt ast.Stmt) {
 		formatCallExpr(ctx, v.Call)
 	case *ast.SendStmt:
 		formatExpr(ctx, v.Chan, &v.Chan)
-		formatExpr(ctx, v.Value, &v.Value)
+		for i, val := range v.Values {
+			formatExpr(ctx, val, &v.Values[i])
+		}
 	case *ast.LabeledStmt:
 		formatStmt(ctx, v.Stmt)
 	case *ast.BranchStmt, *ast.EmptyStmt, nil, *ast.BadStmt:

@@ -17,20 +17,13 @@
 package cl_test
 
 import (
-	"bytes"
 	"os"
-	"strings"
 	"sync"
 	"testing"
 
-	"github.com/goplus/gop"
+	"github.com/goplus/gogen"
 	"github.com/goplus/gop/cl"
-	"github.com/goplus/gop/parser"
-	"github.com/goplus/gop/parser/parsertest"
-	"github.com/goplus/gop/scanner"
-	"github.com/goplus/gop/token"
-	"github.com/goplus/gox"
-	"github.com/goplus/mod/env"
+	"github.com/goplus/gop/cl/cltest"
 )
 
 const (
@@ -38,279 +31,68 @@ const (
 )
 
 var (
-	gblFset *token.FileSet
-	gblConf *cl.Config
+	gblConfLine *cl.Config
 )
 
 func init() {
-	gox.SetDebug(gox.DbgFlagAll)
-	cl.SetDebug(cl.DbgFlagAll)
-	gblFset = token.NewFileSet()
-	imp := gop.NewImporter(nil, &env.Gop{Root: gopRootDir, Version: "1.0"}, gblFset)
-	gblConf = &cl.Config{
-		Fset:          gblFset,
-		Importer:      imp,
-		LookupClass:   lookupClass,
-		LookupPub:     lookupPub,
-		C2goBase:      "github.com/goplus/gop/cl/internal",
-		NoFileLine:    true,
+	cltest.Gop.Root = gopRootDir
+	conf := cltest.Conf
+	gblConfLine = &cl.Config{
+		Fset:          conf.Fset,
+		Importer:      conf.Importer,
+		Recorder:      cltest.Conf.Recorder,
+		LookupClass:   cltest.LookupClass,
+		NoFileLine:    false,
 		NoAutoGenMain: true,
 	}
 }
 
 func gopClNamedTest(t *testing.T, name string, gopcode, expected string) {
-	t.Run(name, func(t *testing.T) {
-		gopClTest(t, gopcode, expected)
-	})
+	cltest.Named(t, name, gopcode, expected)
 }
 
 func gopClTest(t *testing.T, gopcode, expected string) {
-	gopClTestEx(t, gblConf, "main", gopcode, expected)
+	cltest.DoExt(t, cltest.Conf, "main", gopcode, expected)
+}
+
+func gopClTestFile(t *testing.T, gopcode, expected string, fname string) {
+	cltest.DoWithFname(t, gopcode, expected, fname)
 }
 
 func gopClTestEx(t *testing.T, conf *cl.Config, pkgname, gopcode, expected string) {
-	fs := parsertest.NewSingleFileFS("/foo", "bar.gop", gopcode)
-	gopClTestFS(t, conf, fs, pkgname, expected)
+	cltest.DoExt(t, conf, pkgname, gopcode, expected)
 }
 
-func gopMixedClTest(t *testing.T, pkgname, gocode, gopcode, expected string) {
-	fs := parsertest.NewTwoFilesFS("/foo", "a.go", gocode, "b.gop", gopcode)
-	gopClTestFS(t, gblConf, fs, pkgname, expected)
+func gopMixedClTest(t *testing.T, pkgname, gocode, gopcode, expected string, outline ...bool) {
+	cltest.Mixed(t, pkgname, gocode, gopcode, expected, outline...)
 }
 
-func gopClTestFS(t *testing.T, conf *cl.Config, fs parser.FileSystem, pkgname, expected string) {
-	cl.SetDisableRecover(true)
-	defer cl.SetDisableRecover(false)
-
-	pkgs, err := parser.ParseFSDir(gblFset, fs, "/foo", parser.Config{Mode: parser.ParseComments})
-	if err != nil {
-		scanner.PrintError(os.Stderr, err)
-		t.Fatal("ParseFSDir:", err)
-	}
-	bar := pkgs[pkgname]
-	pkg, err := cl.NewPackage("github.com/goplus/gop/cl", bar, conf)
-	if err != nil {
-		t.Fatal("NewPackage:", err)
-	}
-	var b bytes.Buffer
-	err = pkg.WriteTo(&b)
-	if err != nil {
-		t.Fatal("gox.WriteTo failed:", err)
-	}
-	result := b.String()
-	if result != expected {
-		t.Fatalf("\nResult:\n%s\nExpected:\n%s\n", result, expected)
-	}
-}
-
-func TestVargCommand(t *testing.T) {
+func TestTypeDoc(t *testing.T) {
 	gopClTest(t, `
-type foo int
-
-func (f foo) Ls(args ...string) {
-}
-
-var f foo
-f.ls
+type (
+	// doc
+	A int
+)
 `, `package main
-
-type foo int
-
-func (f foo) Ls(args ...string) {
-}
-
-var f foo
-
-func main() {
-	f.Ls()
-}
+// doc
+type A int
 `)
 }
 
-func _TestCommandInPkg(t *testing.T) {
+func TestUnsafe(t *testing.T) {
 	gopClTest(t, `
-func Ls(args ...string) {
-}
+import "unsafe"
 
-ls
-`, `
-`)
-}
-
-func TestFileOpen(t *testing.T) {
-	gopClTest(t, `
-for line <- open("foo.txt")! {
-	println line
-}
+println unsafe.Sizeof(0)
 `, `package main
 
 import (
-	fmt "fmt"
-	os "os"
-	iox "github.com/goplus/gop/builtin/iox"
-	errors "github.com/qiniu/x/errors"
+	"fmt"
+	"unsafe"
 )
 
 func main() {
-	for _gop_it := iox.EnumLines(func() (_gop_ret *os.File) {
-		var _gop_err error
-		_gop_ret, _gop_err = os.Open("foo.txt")
-		if _gop_err != nil {
-			_gop_err = errors.NewFrame(_gop_err, "open(\"foo.txt\")", "/foo/bar.gop", 2, "main.main")
-			panic(_gop_err)
-		}
-		return
-	}()); ; {
-		var _gop_ok bool
-		line, _gop_ok := _gop_it.Next()
-		if !_gop_ok {
-			break
-		}
-		fmt.Println(line)
-	}
-}
-`)
-}
-
-func TestFileEnumLines(t *testing.T) {
-	gopClTest(t, `
-import "os"
-
-for line <- os.Stdin {
-	println line
-}
-`, `package main
-
-import (
-	fmt "fmt"
-	os "os"
-	iox "github.com/goplus/gop/builtin/iox"
-)
-
-func main() {
-	for _gop_it := iox.EnumLines(os.Stdin); ; {
-		var _gop_ok bool
-		line, _gop_ok := _gop_it.Next()
-		if !_gop_ok {
-			break
-		}
-		fmt.Println(line)
-	}
-}
-`)
-}
-
-func TestIoxLines(t *testing.T) {
-	gopClTest(t, `
-import "io"
-
-var r io.Reader
-
-for line <- lines(r) {
-	println line
-}
-`, `package main
-
-import (
-	fmt "fmt"
-	iox "github.com/goplus/gop/builtin/iox"
-	io "io"
-)
-
-var r io.Reader
-
-func main() {
-	for _gop_it := iox.Lines(r).Gop_Enum(); ; {
-		var _gop_ok bool
-		line, _gop_ok := _gop_it.Next()
-		if !_gop_ok {
-			break
-		}
-		fmt.Println(line)
-	}
-}
-`)
-}
-
-func TestMixedGo(t *testing.T) {
-	gopMixedClTest(t, "main", `package main
-
-import "strconv"
-
-const n = 10
-
-func f(v int) string {
-	return strconv.Itoa(v)
-}
-
-type foo struct {
-	v int
-}
-
-func (a foo) _() {
-}
-
-func (a foo) Str() string {
-	return f(a.v)
-}
-
-func (a *foo) Bar() int {
-	return 0
-}
-
-type foo2 = foo
-type foo3 foo2
-`, `
-var a [n]int
-var b string = f(n)
-var c foo2
-var d int = c.v
-var e = foo3{}
-var x string = c.str
-`, `package main
-
-var a [10]int
-var b string = f(n)
-var c foo
-var d int = c.v
-var e = foo3{}
-var x string = c.Str()
-`)
-	gopMixedClTest(t, "main", `package main
-type Point struct {
-	X int
-	Y int
-}
-`, `
-type T struct{}
-println(&T{},&Point{10,20})
-`, `package main
-
-import fmt "fmt"
-
-type T struct {
-}
-
-func main() {
-	fmt.Println(&T{}, &Point{10, 20})
-}
-`)
-}
-
-func Test_RangeExpressionIf_Issue1243(t *testing.T) {
-	gopClTest(t, `
-for i <- :10, i%3 == 0 {
-	println i
-}`, `package main
-
-import fmt "fmt"
-
-func main() {
-	for i := 0; i < 10; i += 1 {
-		if i%3 == 0 {
-			fmt.Println(i)
-		}
-	}
+	fmt.Println(unsafe.Sizeof(0))
 }
 `)
 }
@@ -326,7 +108,7 @@ d := fvec([])
 println a, b, c, d
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 type fvec []float64
 type foo float64
@@ -377,13 +159,13 @@ func main() {
 }
 `, `package main
 
-type Inner interface {
-	DoStuff() error
-}
 type Outer interface {
 	Inner
 }
 type impl struct {
+}
+type Inner interface {
+	DoStuff() error
 }
 
 func (a *impl) DoStuff() error {
@@ -420,6 +202,17 @@ type A struct{ T }
 type B struct{ T }
 `, `package main
 
+type I interface {
+	M() int
+}
+type T int
+type A struct {
+	T
+}
+type B struct {
+	T
+}
+
 func main() {
 	i := I(A{})
 	b := make(chan I, 1)
@@ -427,21 +220,8 @@ func main() {
 	var ok bool
 	i, ok = <-b
 }
-
-type T int
-
 func (T) M() int {
 	return 0
-}
-
-type A struct {
-	T
-}
-type I interface {
-	M() int
-}
-type B struct {
-	T
 }
 `)
 }
@@ -532,8 +312,8 @@ println "The Go+ Language for", fields.join(", ")
 `, `package main
 
 import (
-	fmt "fmt"
-	strings "strings"
+	"fmt"
+	"strings"
 )
 
 func main() {
@@ -549,7 +329,7 @@ p := println
 p "Hello world"
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	p := fmt.Println
@@ -807,8 +587,7 @@ case interface{}(true):
 
 func main() {
 	switch {
-	case interface {
-	}(true):
+	case interface{}(true):
 	}
 }
 `)
@@ -915,8 +694,8 @@ func main() {
 }`, `package main
 
 import (
-	fmt "fmt"
-	errors "github.com/qiniu/x/errors"
+	"fmt"
+	"github.com/qiniu/x/errors"
 )
 
 func t() (int, int, error) {
@@ -949,7 +728,7 @@ func main() {
 	t()!
 }`, `package main
 
-import errors "github.com/qiniu/x/errors"
+import "github.com/qiniu/x/errors"
 
 func t() error {
 	return nil
@@ -992,23 +771,21 @@ func (a *A) String() string {
 }
 `, `package main
 
-import fmt "fmt"
+import "fmt"
+
+type AA interface {
+	String() string
+}
+type A struct {
+	str string
+}
 
 func main() {
 	var a AA = &A{str: "hello"}
 	fmt.Println(a.(*A))
 }
-
-type A struct {
-	str string
-}
-
 func (a *A) String() string {
 	return a.str
-}
-
-type AA interface {
-	String() string
 }
 `)
 	gopClNamedTest(t, "getInterface", `
@@ -1021,13 +798,13 @@ func main() {
 	fmt.Println(a.(*A))
 }
 
+type AA interface {
+	String() string
+}
+
 func get() AA {
 	var a AA
 	return a
-}
-
-type AA interface {
-	String() string
 }
 
 type A struct {
@@ -1039,7 +816,14 @@ func (a *A) String() string {
 }
 `, `package main
 
-import fmt "fmt"
+import "fmt"
+
+type AA interface {
+	String() string
+}
+type A struct {
+	str string
+}
 
 func main() {
 	a := get()
@@ -1049,14 +833,6 @@ func get() AA {
 	var a AA
 	return a
 }
-
-type AA interface {
-	String() string
-}
-type A struct {
-	str string
-}
-
 func (a *A) String() string {
 	return a.str
 }
@@ -1081,7 +857,7 @@ func main() {
 }
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	{
@@ -1133,7 +909,7 @@ func main() {
 var i int
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	fmt.Println(i)
@@ -1176,7 +952,7 @@ func main() {
 var i = 100
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	fmt.Println(i)
@@ -1196,7 +972,7 @@ func main() {
 	println(n)
 }`, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	v := []uint64{2, 3, 5}
@@ -1221,7 +997,7 @@ func consume(xchg chan int) {
 }
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func consume(xchg chan int) {
 	select {
@@ -1254,11 +1030,9 @@ func foo(v interface{}) {
 }
 `, `package main
 
-func bar(p *interface {
-}) {
+func bar(p *interface{}) {
 }
-func foo(v interface {
-}) {
+func foo(v interface{}) {
 	switch t := v.(type) {
 	case int, string:
 		bar(&v)
@@ -1285,11 +1059,9 @@ func foo(v interface{}) {
 }
 `, `package main
 
-func bar(p *interface {
-}) {
+func bar(p *interface{}) {
 }
-func foo(v interface {
-}) {
+func foo(v interface{}) {
 	switch bar(nil); v.(type) {
 	case int, string:
 		bar(&v)
@@ -1307,8 +1079,7 @@ func foo(v interface{}) {
 }
 `, `package main
 
-func foo(v interface {
-}) {
+func foo(v interface{}) {
 	x := v.(int)
 	y, ok := v.(string)
 }
@@ -1394,7 +1165,7 @@ func main() {
 }
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 type Shape interface {
 	Area() float64
@@ -1405,17 +1176,15 @@ type Rect struct {
 	w float64
 	h float64
 }
-
-func (p *Rect) Area() float64 {
-	return p.w * p.h
-}
-
 type Circle struct {
 	x float64
 	y float64
 	r float64
 }
 
+func (p *Rect) Area() float64 {
+	return p.w * p.h
+}
 func (p *Circle) Area() float64 {
 	return 3.14 * p.r * p.r
 }
@@ -1441,7 +1210,7 @@ type BigInt struct {
 	*big.Int
 }`, `package main
 
-import big "math/big"
+import "math/big"
 
 type BigInt struct {
 	*big.Int
@@ -1455,16 +1224,16 @@ func TestAutoProperty(t *testing.T) {
 func foo(script string) {
 	doc := goptest.New(script)!
 
-	println(doc.any.funcDecl.name)
-	println(doc.any.importSpec.name)
+	echo doc.any.funcDecl.name
+	echo doc.any.importSpec.name
 }
 `, `package main
 
 import (
-	fmt "fmt"
-	goptest "github.com/goplus/gop/ast/goptest"
-	errors "github.com/qiniu/x/errors"
-	gopq "github.com/goplus/gop/ast/gopq"
+	"fmt"
+	"github.com/goplus/gop/ast/gopq"
+	"github.com/goplus/gop/ast/goptest"
+	"github.com/qiniu/x/errors"
 )
 
 func foo(script string) {
@@ -1477,7 +1246,7 @@ func foo(script string) {
 		}
 		return
 	}()
-	fmt.Println(doc.Any().FuncDecl().Name())
+	fmt.Println(doc.Any().FuncDecl__0().Name())
 	fmt.Println(doc.Any().ImportSpec().Name())
 }
 `)
@@ -1495,10 +1264,10 @@ func foo(script string) {
 `, `package main
 
 import (
-	fmt "fmt"
-	goptest "github.com/goplus/gop/ast/goptest"
-	errors "github.com/qiniu/x/errors"
-	gopq "github.com/goplus/gop/ast/gopq"
+	"fmt"
+	"github.com/goplus/gop/ast/gopq"
+	"github.com/goplus/gop/ast/goptest"
+	"github.com/qiniu/x/errors"
 )
 
 func foo(script string) {
@@ -1511,7 +1280,7 @@ func foo(script string) {
 		}
 		return
 	}()
-	fmt.Println(doc.Any().FuncDecl().Name())
+	fmt.Println(doc.Any().FuncDecl__0().Name())
 	fmt.Println(doc.Any().ImportSpec().Name())
 }
 `)
@@ -1527,8 +1296,8 @@ func add(x, y string) (int, error) {
 `, `package main
 
 import (
-	strconv "strconv"
-	errors "github.com/qiniu/x/errors"
+	"github.com/qiniu/x/errors"
+	"strconv"
 )
 
 func add(x string, y string) (int, error) {
@@ -1568,7 +1337,7 @@ func addSafe(x, y string) int {
 }
 `, `package main
 
-import strconv "strconv"
+import "strconv"
 
 func addSafe(x string, y string) int {
 	return func() (_gop_ret int) {
@@ -1596,8 +1365,8 @@ var ret int = println("Hi")!
 `, `package main
 
 import (
-	fmt "fmt"
-	errors "github.com/qiniu/x/errors"
+	"fmt"
+	"github.com/qiniu/x/errors"
 )
 
 var ret int = func() (_gop_ret int) {
@@ -1621,7 +1390,7 @@ func mkdir(name string) error {
 mkdir! "foo"
 `, `package main
 
-import errors "github.com/qiniu/x/errors"
+import "github.com/qiniu/x/errors"
 
 func mkdir(name string) error {
 	return nil
@@ -1649,7 +1418,7 @@ func foo() (func(), error) {
 foo()!()
 `, `package main
 
-import errors "github.com/qiniu/x/errors"
+import "github.com/qiniu/x/errors"
 
 func foo() (func(), error) {
 	return nil, nil
@@ -1698,10 +1467,10 @@ var x, y uint128
 var z uint128 = x + y
 `, `package main
 
-import ng "github.com/goplus/gop/builtin/ng"
+import "github.com/goplus/gop/builtin/ng"
 
 var x, y ng.Uint128
-var z ng.Uint128 = x.Gop_Add__1(y)
+var z ng.Uint128 = (ng.Uint128).Gop_Add__1(x, y)
 `)
 }
 
@@ -1711,10 +1480,10 @@ var x, y int128
 var z int128 = x + y
 `, `package main
 
-import ng "github.com/goplus/gop/builtin/ng"
+import "github.com/goplus/gop/builtin/ng"
 
 var x, y ng.Int128
-var z ng.Int128 = x.Gop_Add__1(y)
+var z ng.Int128 = (ng.Int128).Gop_Add__1(x, y)
 `)
 }
 
@@ -1724,10 +1493,10 @@ var x, y bigint
 var z bigint = x + y
 `, `package main
 
-import ng "github.com/goplus/gop/builtin/ng"
+import "github.com/goplus/gop/builtin/ng"
 
 var x, y ng.Bigint
-var z ng.Bigint = x.Gop_Add(y)
+var z ng.Bigint = (ng.Bigint).Gop_Add(x, y)
 `)
 }
 
@@ -1737,8 +1506,8 @@ var x = 1r
 `, `package main
 
 import (
-	ng "github.com/goplus/gop/builtin/ng"
-	big "math/big"
+	"github.com/goplus/gop/builtin/ng"
+	"math/big"
 )
 
 var x = ng.Bigint_Init__1(big.NewInt(1))
@@ -1750,7 +1519,7 @@ func TestUint128Lit(t *testing.T) {
 var x uint128 = 1
 `, `package main
 
-import ng "github.com/goplus/gop/builtin/ng"
+import "github.com/goplus/gop/builtin/ng"
 
 var x ng.Uint128 = ng.Uint128_Init__0(1)
 `)
@@ -1761,7 +1530,7 @@ func TestInt128Lit(t *testing.T) {
 var x int128 = 1
 `, `package main
 
-import ng "github.com/goplus/gop/builtin/ng"
+import "github.com/goplus/gop/builtin/ng"
 
 var x ng.Int128 = ng.Int128_Init__0(1)
 `)
@@ -1773,8 +1542,8 @@ var x = 1/2r
 `, `package main
 
 import (
-	ng "github.com/goplus/gop/builtin/ng"
-	big "math/big"
+	"github.com/goplus/gop/builtin/ng"
+	"math/big"
 )
 
 var x = ng.Bigrat_Init__2(big.NewRat(1, 2))
@@ -1787,8 +1556,8 @@ var x = 3 + 1/2r
 `, `package main
 
 import (
-	ng "github.com/goplus/gop/builtin/ng"
-	big "math/big"
+	"github.com/goplus/gop/builtin/ng"
+	"math/big"
 )
 
 var x = ng.Bigrat_Init__2(big.NewRat(7, 2))
@@ -1796,7 +1565,7 @@ var x = ng.Bigrat_Init__2(big.NewRat(7, 2))
 }
 
 func TestBigRatAdd(t *testing.T) {
-	gox.SetDebug(gox.DbgFlagAll)
+	gogen.SetDebug(gogen.DbgFlagAll)
 	gopClTest(t, `
 var x = 3 + 1/2r
 var y = x + 100
@@ -1804,13 +1573,13 @@ var z = 100 + y
 `, `package main
 
 import (
-	ng "github.com/goplus/gop/builtin/ng"
-	big "math/big"
+	"github.com/goplus/gop/builtin/ng"
+	"math/big"
 )
 
 var x = ng.Bigrat_Init__2(big.NewRat(7, 2))
-var y = x.Gop_Add(ng.Bigrat_Init__0(100))
-var z = ng.Bigrat_Init__0(100) + y
+var y = (ng.Bigrat).Gop_Add(x, ng.Bigrat_Init__0(100))
+var z = (ng.Bigrat).Gop_Add(ng.Bigrat_Init__0(100), y)
 `)
 }
 
@@ -1825,8 +1594,7 @@ var y *uint32 = (*uint32)(nil)
 
 var a = (*struct {
 })(nil)
-var b = interface {
-}(nil)
+var b = interface{}(nil)
 var c = (func())(nil)
 var x uint32 = uint32(0)
 var y *uint32 = (*uint32)(nil)
@@ -1841,6 +1609,32 @@ var y uint32 = *x
 
 var x *uint32 = (*uint32)(nil)
 var y uint32 = *x
+`)
+}
+
+func TestLHS(t *testing.T) {
+	gopClTest(t, `
+type T struct {
+	a int
+}
+
+func foo() *T {
+	return nil
+}
+
+foo().a = 123
+`, `package main
+
+type T struct {
+	a int
+}
+
+func foo() *T {
+	return nil
+}
+func main() {
+	foo().a = 123
+}
 `)
 }
 
@@ -1892,7 +1686,7 @@ var x bigint
 x += 3
 `, `package main
 
-import ng "github.com/goplus/gop/builtin/ng"
+import "github.com/goplus/gop/builtin/ng"
 
 var x ng.Bigint
 
@@ -1909,8 +1703,8 @@ x *= 2
 `, `package main
 
 import (
-	ng "github.com/goplus/gop/builtin/ng"
-	big "math/big"
+	"github.com/goplus/gop/builtin/ng"
+	"math/big"
 )
 
 func main() {
@@ -1927,8 +1721,8 @@ x *= 2r
 `, `package main
 
 import (
-	ng "github.com/goplus/gop/builtin/ng"
-	big "math/big"
+	"github.com/goplus/gop/builtin/ng"
+	"math/big"
 )
 
 func main() {
@@ -2011,6 +1805,8 @@ func bar(conf ...Config) {
 
 foo({A: 1})
 bar({A: 2})
+foo({})
+bar({})
 `, `package main
 
 type Config struct {
@@ -2024,6 +1820,8 @@ func bar(conf ...Config) {
 func main() {
 	foo(&Config{A: 1})
 	bar(Config{A: 2})
+	foo(&Config{})
+	bar(Config{})
 }
 `)
 }
@@ -2076,8 +1874,7 @@ z := []
 func main() {
 	x := []float64{1, 3.4, 5}
 	y := []int{1}
-	z := []interface {
-	}{}
+	z := []interface{}{}
 }
 `)
 	gopClTest(t, `
@@ -2143,13 +1940,13 @@ c := foo{B: "Hi"}
 
 type foo struct {
 	A int
-	B string "tag1:123"
+	B string `+"`tag1:123`"+`
 }
 
 func main() {
 	a := struct {
 		A int
-		B string "tag1:123"
+		B string `+"`tag1:123`"+`
 	}{1, "Hello"}
 	b := foo{1, "Hello"}
 	c := foo{B: "Hi"}
@@ -2179,7 +1976,7 @@ type bar = foo
 type foo struct {
 	p *foo
 	A int
-	B string "tag1:123"
+	B string `+"`tag1:123`"+`
 }
 
 func main() {
@@ -2197,7 +1994,7 @@ go println("Hi")
 defer println("Go+")
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	go fmt.Println("Hi")
@@ -2217,7 +2014,7 @@ for {
 }
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	a := []float64{1, 3.4, 5}
@@ -2254,7 +2051,7 @@ for range a {
 }
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	a := []float64{1, 3.4, 5}
@@ -2292,7 +2089,7 @@ for k, v := range new(foo) {
 }
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 type foo struct {
 }
@@ -2320,7 +2117,7 @@ for v <- new(foo) {
 }
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 type foo struct {
 }
@@ -2355,18 +2152,16 @@ for k, v <- new(foo) {
 }
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 type fooIter struct {
+}
+type foo struct {
 }
 
 func (p fooIter) Next() (key string, val int, ok bool) {
 	return
 }
-
-type foo struct {
-}
-
 func (p *foo) Gop_Enum() fooIter {
 }
 func main() {
@@ -2393,7 +2188,7 @@ func (p *foo) Gop_Enum(c func(val string)) {
 println([v for v <- new(foo)])
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 type foo struct {
 }
@@ -2444,11 +2239,15 @@ for k, v <- newFoo() {
 }
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 type fooIter struct {
 	data *foo
 	idx  int
+}
+type foo struct {
+	key []int
+	val []string
 }
 
 func (p *fooIter) Next() (key int, val string, ok bool) {
@@ -2458,12 +2257,6 @@ func (p *fooIter) Next() (key int, val string, ok bool) {
 	}
 	return
 }
-
-type foo struct {
-	key []int
-	val []string
-}
-
 func (p *foo) Gop_Enum() *fooIter {
 	return &fooIter{data: p}
 }
@@ -2495,7 +2288,7 @@ for i, x <- [1, 3, 5, 7, 11, 13, 17] {
 println("sum(5,7,11,13,17):", sum)
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	sum := 0
@@ -2666,7 +2459,7 @@ x := [[a, b] for a <- arr, a < b for b <- arr, b > 2]
 println("x:", x)
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	arr := []float64{1, 2, 3, 4.1, 5, 6}
@@ -2772,8 +2565,8 @@ println("x:", x)
 `, `package main
 
 import (
-	fmt "fmt"
-	strings "strings"
+	"fmt"
+	"strings"
 )
 
 func main() {
@@ -2796,7 +2589,7 @@ func bar(p pfoo) {
 }
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 type foo struct {
 	req int
@@ -2825,7 +2618,7 @@ a.B = "Hi"
 flag.Usage = nil
 `, `package main
 
-import flag "flag"
+import "flag"
 
 func main() {
 	a := &struct {
@@ -2885,7 +2678,7 @@ func (M) Bar() {
 }
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 type M int
 
@@ -2898,75 +2691,10 @@ func (M) Bar() {
 `)
 }
 
-func TestOverloadOp(t *testing.T) {
-	gopClTest(t, `
-type foo struct {
-}
-
-func (a *foo) + (b *foo) *foo {
-	println("a + b")
-	return &foo{}
-}
-
-func (a foo) - (b foo) foo {
-	println("a - b")
-	return foo{}
-}
-
-func -(a foo) {
-	println("-a")
-}
-
-func ++(a foo) {
-	println("a++")
-}
-
-func (a foo) != (b foo) bool{
-	println("a!=b")	
-	return true
-}
-
-var a, b foo
-var c = a - b
-var d = -a       // TODO: -a have no return value!
-var e = a!=b
-`, `package main
-
-import fmt "fmt"
-
-type foo struct {
-}
-
-func (a *foo) Gop_Add(b *foo) *foo {
-	fmt.Println("a + b")
-	return &foo{}
-}
-func (a foo) Gop_Sub(b foo) foo {
-	fmt.Println("a - b")
-	return foo{}
-}
-func (a foo) Gop_NE(b foo) bool {
-	fmt.Println("a!=b")
-	return true
-}
-func (a foo) Gop_Neg() {
-	fmt.Println("-a")
-}
-func (a foo) Gop_Inc() {
-	fmt.Println("a++")
-}
-
-var a, b foo
-var c = a.Gop_Sub(b)
-var d = a.Gop_Neg()
-var e = a.Gop_NE(b)
-`)
-}
-
 func TestCmdlineNoEOL(t *testing.T) {
 	gopClTest(t, `println "Hi"`, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	fmt.Println("Hi")
@@ -2981,7 +2709,7 @@ func main() {
 	fmt.println "Hi"
 }`, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	fmt.Println("Hi")
@@ -2995,7 +2723,7 @@ func TestDotImport(t *testing.T) {
 var a = round(1.2)
 `, `package main
 
-import math "math"
+import "math"
 
 var a = math.Round(1.2)
 `)
@@ -3007,7 +2735,7 @@ func TestLocalImport(t *testing.T) {
 var a = spx.TestIntValue
 `, `package main
 
-import spx "github.com/goplus/gop/cl/internal/spx"
+import "github.com/goplus/gop/cl/internal/spx"
 
 var a = spx.TestIntValue
 `)
@@ -3042,7 +2770,7 @@ func TestAnonymousImport(t *testing.T) {
 printf("Hello Go+\n")
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	fmt.Println("Hello")
@@ -3081,7 +2809,7 @@ func main() {
 	fmt.Println("Hi")
 }`, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	const (
@@ -3106,7 +2834,7 @@ if t := false; t {
 println("x:", x)
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	x := 0
@@ -3146,7 +2874,7 @@ default:
 println("x:", x)
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	x := 0
@@ -3187,7 +2915,7 @@ default:
 }
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	v := "Hello"
@@ -3219,7 +2947,7 @@ label:
 	}
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	a := []float64{1, 3.4, 5}
@@ -3246,10 +2974,9 @@ func main() {
 }
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
-func foo(format string, args ...interface {
-}) (int, error) {
+func foo(format string, args ...interface{}) (int, error) {
 	return fmt.Printf(format, args...)
 }
 func main() {
@@ -3267,8 +2994,7 @@ func main() {
 }
 `, `package main
 
-func foo(format string, args ...interface {
-}) (int, error) {
+func foo(format string, args ...interface{}) (int, error) {
 	return 0, nil
 }
 func main() {
@@ -3284,7 +3010,7 @@ func(v string) {
 }("Hello")
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	func(v string) {
@@ -3301,8 +3027,7 @@ func TestFunc(t *testing.T) {
 func main() {
 }`, `package main
 
-func foo(format string, a [10]int, args ...interface {
-}) {
+func foo(format string, a [10]int, args ...interface{}) {
 }
 func main() {
 }
@@ -3425,7 +3150,7 @@ Do => {
 }
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func Do(func()) {
 }
@@ -3594,10 +3319,9 @@ func bar(foo func(string, ...interface{}) (int, error)) {
 bar(fmt.Printf)
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
-func bar(foo func(string, ...interface {
-}) (int, error)) {
+func bar(foo func(string, ...interface{}) (int, error)) {
 	foo("Hello, %v!\n", "Go+")
 }
 func main() {
@@ -3631,20 +3355,18 @@ fmt.Println(printf("Hello, %v\n", "Go+"))
 `, `package main
 
 import (
-	fmt "fmt"
-	strings "strings"
+	"fmt"
+	"strings"
 )
 
 func foo(x string) string {
 	return strings.NewReplacer("?", "!").Replace(x)
 }
-func printf(format string, args ...interface {
-}) (n int, err error) {
+func printf(format string, args ...interface{}) (n int, err error) {
 	n, err = fmt.Printf(format, args...)
 	return
 }
-func bar(foo func(string, ...interface {
-}) (int, error)) {
+func bar(foo func(string, ...interface{}) (int, error)) {
 	foo("Hello, %v!\n", "Go+")
 }
 func main() {
@@ -3660,7 +3382,7 @@ func TestFuncCall(t *testing.T) {
 
 fmt.Println("Hello")`, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	fmt.Println("Hello")
@@ -3678,10 +3400,9 @@ func foo(args ...interface{}) {
 func main() {
 }`, `package main
 
-import fmt "fmt"
+import "fmt"
 
-func foo(args ...interface {
-}) {
+func foo(args ...interface{}) {
 	fmt.Println(args...)
 }
 func main() {
@@ -3701,13 +3422,12 @@ func foo(args ...interface{}) {
 }
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	foo("Hello", 123)
 }
-func foo(args ...interface {
-}) {
+func foo(args ...interface{}) {
 	fmt.Println(args...)
 }
 `)
@@ -3737,7 +3457,7 @@ func TestAssignUnderscore(t *testing.T) {
 _, err := log.Println("Hello")
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	_, err := fmt.Println("Hello")
@@ -3784,8 +3504,8 @@ println(rmap)
 `, `package main
 
 import (
-	fmt "fmt"
-	foo "github.com/goplus/gop/cl/internal/gop-in-go/foo"
+	"fmt"
+	"github.com/goplus/gop/cl/internal/gop-in-go/foo"
 )
 
 func main() {
@@ -3830,9 +3550,16 @@ func New() Result {
 `, `package main
 
 import (
-	reflect "reflect"
-	testing "testing"
+	"reflect"
+	"testing"
 )
+
+type Repo struct {
+	Title string
+}
+type Result struct {
+	Repo Repo
+}
 
 func TestNew(t *testing.T) {
 	ret := New()
@@ -3848,243 +3575,8 @@ func New() Result {
 func newRepo() Repo {
 	return Repo{Title: "Hi"}
 }
-
-type Repo struct {
-	Title string
-}
-type Result struct {
-	Repo Repo
-}
 `)
 	}
-}
-
-func testRangeExpr(t *testing.T, codeTpl, expect string) {
-	for k, s := range []string{" <- ", " := range ", " = range "} {
-		if k == 2 {
-			codeTpl = "i:=0\n" + codeTpl
-			expect = strings.Replace(expect, "for i := ", "i := 0\n\tfor i = ", -1)
-		}
-		gopClTest(t, strings.Replace(codeTpl, "$", s, -1), expect)
-	}
-}
-
-func TestRangeExpr(t *testing.T) {
-	testRangeExpr(t, `
-for i $ :10 {
-	println(i)
-}`, `package main
-
-import fmt "fmt"
-
-func main() {
-	for i := 0; i < 10; i += 1 {
-		fmt.Println(i)
-	}
-}
-`)
-}
-
-func TestRangeExpr2(t *testing.T) {
-	testRangeExpr(t, `
-for i $ 1:10:2 {
-	println(i)
-}`, `package main
-
-import fmt "fmt"
-
-func main() {
-	for i := 1; i < 10; i += 2 {
-		fmt.Println(i)
-	}
-}
-`)
-}
-
-func TestRangeExpr3(t *testing.T) {
-	testRangeExpr(t, `
-for i $ 1:10 {
-	println(i)
-}`, `package main
-
-import fmt "fmt"
-
-func main() {
-	for i := 1; i < 10; i += 1 {
-		fmt.Println(i)
-	}
-}
-`)
-}
-
-func TestRangeExpr4(t *testing.T) {
-	testRangeExpr(t, `
-for i $ :10:2 {
-	println(i)
-}`, `package main
-
-import fmt "fmt"
-
-func main() {
-	for i := 0; i < 10; i += 2 {
-		fmt.Println(i)
-	}
-}
-`)
-}
-
-func TestRangeExpr5(t *testing.T) {
-	gopClTest(t, `
-for range :10 {
-	println("Hi")
-}`, `package main
-
-import fmt "fmt"
-
-func main() {
-	for _gop_k := 0; _gop_k < 10; _gop_k += 1 {
-		fmt.Println("Hi")
-	}
-}
-`)
-}
-
-func TestRangeExpr6(t *testing.T) {
-	gopClTest(t, `
-for _ <- :10 {
-	println("Hi")
-}`, `package main
-
-import fmt "fmt"
-
-func main() {
-	for _gop_k := 0; _gop_k < 10; _gop_k += 1 {
-		fmt.Println("Hi")
-	}
-}
-`)
-}
-
-func TestRangeExpr7(t *testing.T) {
-	gopClTest(t, `
-println [x for x <- 0:3:1]
-`, `package main
-
-import (
-	fmt "fmt"
-	builtin "github.com/goplus/gop/builtin"
-)
-
-func main() {
-	fmt.Println(func() (_gop_ret []int) {
-		for _gop_it := builtin.NewRange__0(0, 3, 1).Gop_Enum(); ; {
-			var _gop_ok bool
-			x, _gop_ok := _gop_it.Next()
-			if !_gop_ok {
-				break
-			}
-			_gop_ret = append(_gop_ret, x)
-		}
-		return
-	}())
-}
-`)
-}
-
-func testRangeExpr8(t *testing.T, codeTpl, expect string) {
-	for _, s := range []string{" <- ", " := range "} {
-		gopClTest(t, strings.Replace(codeTpl, "$", s, -1), expect)
-	}
-}
-
-func TestRangeExpr8(t *testing.T) {
-	testRangeExpr8(t, `
-	type T struct{}
-
-	func (t T)start()int{
-		return 0
-	}
-	func (t T)end()int{
-		return 3 
-	}
-	func (t T)step()int{
-		return 1 
-	}
-	
-	t:=T{}
-	
-	for i <- t.start():t.end():t.step(){
-		println i
-	}
-	`, `package main
-
-import fmt "fmt"
-
-type T struct {
-}
-
-func (t T) start() int {
-	return 0
-}
-func (t T) end() int {
-	return 3
-}
-func (t T) step() int {
-	return 1
-}
-func main() {
-	t := T{}
-	for i, _gop_end, _gop_step := t.start(), t.end(), t.step(); i < _gop_end; i += _gop_step {
-		fmt.Println(i)
-	}
-}
-`)
-}
-
-func TestRangeExpr9(t *testing.T) {
-	testRangeExpr8(t, `
-	type T struct{}
-
-	func (t T)start()int{
-		return 0
-	}
-	func (t T)end()int{
-		return 3 
-	}
-	func (t T)step()int{
-		return 1 
-	}
-	
-	t:=T{}
-	i:=0
-	for i =range t.start():t.end():t.step(){
-		println i
-	}
-	`, `package main
-
-import fmt "fmt"
-
-type T struct {
-}
-
-func (t T) start() int {
-	return 0
-}
-func (t T) end() int {
-	return 3
-}
-func (t T) step() int {
-	return 1
-}
-func main() {
-	t := T{}
-	i := 0
-	for _gop_k, _gop_end, _gop_step := t.start(), t.end(), t.step(); _gop_k < _gop_end; _gop_k += _gop_step {
-		i = _gop_k
-		fmt.Println(i)
-	}
-}
-`)
 }
 
 func TestGoFuncInstr(t *testing.T) {
@@ -4118,17 +3610,17 @@ func TestNoEntrypoint(t *testing.T) {
 	gopClTest(t, `println("init")
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	fmt.Println("init")
 }
 `)
-	gopClTestEx(t, gblConf, "bar", `package bar
+	gopClTestEx(t, cltest.Conf, "bar", `package bar
 println("init")
 `, `package bar
 
-import fmt "fmt"
+import "fmt"
 
 func init() {
 	fmt.Println("init")
@@ -4152,13 +3644,11 @@ println []
 println {}
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
-	fmt.Println([]interface {
-	}{})
-	fmt.Println(map[string]interface {
-	}{})
+	fmt.Println([]interface{}{})
+	fmt.Println(map[string]interface{}{})
 }
 `)
 }
@@ -4176,7 +3666,7 @@ type Point struct {
 }
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 type Point struct {
 	X int
@@ -4199,7 +3689,7 @@ println "hello"
 println("hello")
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	fmt.Print()
@@ -4218,10 +3708,9 @@ var a any = 100
 println(a)
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
-var a interface {
-} = 100
+var a interface{} = 100
 
 func main() {
 	fmt.Println(a)
@@ -4230,7 +3719,7 @@ func main() {
 }
 
 func TestMainEntry(t *testing.T) {
-	conf := *gblConf
+	conf := *cltest.Conf
 	conf.NoAutoGenMain = false
 
 	gopClTestEx(t, &conf, "main", `
@@ -4245,7 +3734,7 @@ func test() {
 }
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func test() {
 	fmt.Println("hello")
@@ -4260,10 +3749,505 @@ func main() {
 }
 `, `package main
 
-import fmt "fmt"
+import "fmt"
 
 func main() {
 	fmt.Println("hello")
+}
+`)
+}
+
+func TestCommandNotExpr(t *testing.T) {
+	gopClTest(t, `
+println !true
+`, `package main
+
+import "fmt"
+
+func main() {
+	fmt.Println(false)
+}
+`)
+	gopClTest(t, `
+a := true
+println !a
+`, `package main
+
+import "fmt"
+
+func main() {
+	a := true
+	fmt.Println(!a)
+}
+`)
+	gopClTest(t, `
+println !func() bool { return true }()
+`, `package main
+
+import "fmt"
+
+func main() {
+	fmt.Println(!func() bool {
+		return true
+	}())
+}
+`)
+}
+
+func TestCommentLine(t *testing.T) {
+	gopClTestEx(t, gblConfLine, "main", `
+type Point struct {
+	x int
+	y int
+}
+
+func (pt *Point) Test() {
+	println(pt.x, pt.y)
+}
+
+// testPoint is test point
+func testPoint() {
+	var pt Point
+	pt.Test()
+}
+
+println "hello"
+testPoint()
+`, `package main
+
+import "fmt"
+
+type Point struct {
+	x int
+	y int
+}
+//line /foo/bar.gop:7:1
+func (pt *Point) Test() {
+//line /foo/bar.gop:8:1
+	fmt.Println(pt.x, pt.y)
+}
+//line /foo/bar.gop:11:1
+// testPoint is test point
+func testPoint() {
+//line /foo/bar.gop:13:1
+	var pt Point
+//line /foo/bar.gop:14:1
+	pt.Test()
+}
+//line /foo/bar.gop:17
+func main() {
+//line /foo/bar.gop:17:1
+	fmt.Println("hello")
+//line /foo/bar.gop:18:1
+	testPoint()
+}
+`)
+}
+
+func TestCommentLineRoot(t *testing.T) {
+	conf := *cltest.Conf
+	conf.NoFileLine = false
+	conf.RelativeBase = "/foo/root"
+	var src = `
+type Point struct {
+	x int
+	y int
+}
+
+func (pt *Point) Test() {
+	println(pt.x, pt.y)
+}
+
+// testPoint is test point
+func testPoint() {
+	var pt Point
+	pt.Test()
+}
+
+println "hello"
+testPoint()
+`
+	var expected = `package main
+
+import "fmt"
+
+type Point struct {
+	x int
+	y int
+}
+//line ../bar.gop:7:1
+func (pt *Point) Test() {
+//line ../bar.gop:8:1
+	fmt.Println(pt.x, pt.y)
+}
+//line ../bar.gop:11:1
+// testPoint is test point
+func testPoint() {
+//line ../bar.gop:13:1
+	var pt Point
+//line ../bar.gop:14:1
+	pt.Test()
+}
+//line ../bar.gop:17
+func main() {
+//line ../bar.gop:17:1
+	fmt.Println("hello")
+//line ../bar.gop:18:1
+	testPoint()
+}
+`
+	gopClTestEx(t, &conf, "main", src, expected)
+}
+
+func TestRangeScope(t *testing.T) {
+	gopClTest(t, `
+ar := []int{100, 200}
+for k, v := range ar {
+	println(k, v, ar)
+	var k, v, ar int
+	println(ar, k, v)
+}
+`, `package main
+
+import "fmt"
+
+func main() {
+	ar := []int{100, 200}
+	for k, v := range ar {
+		fmt.Println(k, v, ar)
+		var k, v, ar int
+		fmt.Println(ar, k, v)
+	}
+}
+`)
+}
+
+func TestSelectScope(t *testing.T) {
+	gopClTest(t, `
+c1 := make(chan int)
+c2 := make(chan int)
+go func() {
+	c1 <- 100
+}()
+select {
+case i := <-c1:
+	println i
+case i := <-c2:
+	println i
+}
+`, `package main
+
+import "fmt"
+
+func main() {
+	c1 := make(chan int)
+	c2 := make(chan int)
+	go func() {
+		c1 <- 100
+	}()
+	select {
+	case i := <-c1:
+		fmt.Println(i)
+	case i := <-c2:
+		fmt.Println(i)
+	}
+}
+`)
+}
+
+func TestCommentVar(t *testing.T) {
+	gopClTestEx(t, gblConfLine, "main", `
+// doc a line2
+var a int
+println a
+
+// doc b line6
+var b int
+println b
+
+var c int
+println c
+`, `package main
+
+import "fmt"
+// doc a line2
+var a int
+//line /foo/bar.gop:4
+func main() {
+//line /foo/bar.gop:4:1
+	fmt.Println(a)
+//line /foo/bar.gop:6:1
+	// doc b line6
+	var b int
+//line /foo/bar.gop:8:1
+	fmt.Println(b)
+//line /foo/bar.gop:10:1
+	var c int
+//line /foo/bar.gop:11:1
+	fmt.Println(c)
+}
+`)
+
+	gopClTestEx(t, gblConfLine, "main", `
+func demo() {
+	// doc a line3
+	var a int
+	println a
+	
+	// doc b line7
+	var b int
+	println b
+	
+	var c int
+	println c
+}
+`, `package main
+
+import "fmt"
+//line /foo/bar.gop:2:1
+func demo() {
+//line /foo/bar.gop:3:1
+	// doc a line3
+	var a int
+//line /foo/bar.gop:5:1
+	fmt.Println(a)
+//line /foo/bar.gop:7:1
+	// doc b line7
+	var b int
+//line /foo/bar.gop:9:1
+	fmt.Println(b)
+//line /foo/bar.gop:11:1
+	var c int
+//line /foo/bar.gop:12:1
+	fmt.Println(c)
+}
+`)
+}
+
+func TestForPhraseScope(t *testing.T) {
+	gopClTest(t, `sum := 0
+for x <- [1, 3, 5, 7, 11, 13, 17] {
+	sum = sum + x
+	println x
+	x := 200
+	println x
+}`, `package main
+
+import "fmt"
+
+func main() {
+	sum := 0
+	for _, x := range []int{1, 3, 5, 7, 11, 13, 17} {
+		sum = sum + x
+		fmt.Println(x)
+		x := 200
+		fmt.Println(x)
+	}
+}
+`)
+	gopClTest(t, `sum := 0
+for x <- [1, 3, 5, 7, 11, 13, 17], x > 3 {
+	sum = sum + x
+	println x
+	x := 200
+	println x
+}`, `package main
+
+import "fmt"
+
+func main() {
+	sum := 0
+	for _, x := range []int{1, 3, 5, 7, 11, 13, 17} {
+		if x > 3 {
+			sum = sum + x
+			fmt.Println(x)
+			x := 200
+			fmt.Println(x)
+		}
+	}
+}
+`)
+}
+
+func TestAddress(t *testing.T) {
+	gopClTest(t, `
+type foo struct{ c int }
+
+func (f foo) ptr() *foo { return &f }
+func (f foo) clone() foo { return f }
+
+type nested struct {
+	f foo
+	a [2]foo
+	s []foo
+}
+
+func _() {
+	getNested := func() nested { return nested{} }
+
+	_ = getNested().f.c
+	_ = getNested().a[0].c
+	_ = getNested().s[0].c
+	_ = getNested().f.ptr().c
+	_ = getNested().f.clone().c
+	_ = getNested().f.clone().ptr().c
+}
+`, `package main
+
+type foo struct {
+	c int
+}
+type nested struct {
+	f foo
+	a [2]foo
+	s []foo
+}
+
+func (f foo) ptr() *foo {
+	return &f
+}
+func (f foo) clone() foo {
+	return f
+}
+func _() {
+	getNested := func() nested {
+		return nested{}
+	}
+	_ = getNested().f.c
+	_ = getNested().a[0].c
+	_ = getNested().s[0].c
+	_ = getNested().f.ptr().c
+	_ = getNested().f.clone().c
+	_ = getNested().f.clone().ptr().c
+}
+`)
+}
+
+func TestSliceLitAssign(t *testing.T) {
+	gopClTest(t, `
+var n = 1
+var a []any = [10, 3.14, 200]
+n, a = 100, [10, 3.14, 200]
+echo a, n
+`, `package main
+
+import "fmt"
+
+var n = 1
+var a []interface{} = []interface{}{10, 3.14, 200}
+
+func main() {
+	n, a = 100, []interface{}{10, 3.14, 200}
+	fmt.Println(a, n)
+}
+`)
+}
+
+func TestSliceLitReturn(t *testing.T) {
+	gopClTest(t, `
+func anyslice() (int, []any) {
+	return 100, [10, 3.14, 200]
+}
+n, a := anyslice()
+echo n, a
+`, `package main
+
+import "fmt"
+
+func anyslice() (int, []interface{}) {
+	return 100, []interface{}{10, 3.14, 200}
+}
+func main() {
+	n, a := anyslice()
+	fmt.Println(n, a)
+}
+`)
+}
+
+func TestCompositeLitAssign(t *testing.T) {
+	gopClTest(t, `
+var a map[any]any = {10: "A", 3.14: "B", 200: "C"}
+var b map[any]string = {10: "A", 3.14: "B", 200: "C"}
+echo a
+echo b
+var n int
+n, a = 1, {10: "A", 3.14: "B", 200: "C"}
+echo a, n
+n, b = 1, {10: "A", 3.14: "B", 200: "C"}
+echo b, n
+`, `package main
+
+import "fmt"
+
+var a map[interface{}]interface{} = map[interface{}]interface{}{10: "A", 3.14: "B", 200: "C"}
+var b map[interface{}]string = map[interface{}]string{10: "A", 3.14: "B", 200: "C"}
+
+func main() {
+	fmt.Println(a)
+	fmt.Println(b)
+	var n int
+	n, a = 1, map[interface{}]interface{}{10: "A", 3.14: "B", 200: "C"}
+	fmt.Println(a, n)
+	n, b = 1, map[interface{}]string{10: "A", 3.14: "B", 200: "C"}
+	fmt.Println(b, n)
+}
+`)
+}
+
+func TestCompositeLitStruct(t *testing.T) {
+	gopClTest(t, `
+type T struct {
+	s  []any
+	m  map[any]any
+	fn func(int) int
+}
+
+echo &T{[10, 3.14, 200], {10: "A", 3.14: "B", 200: "C"}, (x => x)}
+echo &T{s: [10, 3.14, 200], m: {10: "A", 3.14: "B", 200: "C"}, fn: (x => x)}
+`, `package main
+
+import "fmt"
+
+type T struct {
+	s  []interface{}
+	m  map[interface{}]interface{}
+	fn func(int) int
+}
+
+func main() {
+	fmt.Println(&T{[]interface{}{10, 3.14, 200}, map[interface{}]interface{}{10: "A", 3.14: "B", 200: "C"}, func(x int) int {
+		return x
+	}})
+	fmt.Println(&T{s: []interface{}{10, 3.14, 200}, m: map[interface{}]interface{}{10: "A", 3.14: "B", 200: "C"}, fn: func(x int) int {
+		return x
+	}})
+}
+`)
+}
+
+func TestCompositeLitEx(t *testing.T) {
+	gopClTest(t, `
+var a [][]any = {[10, 3.14, 200], [100, 200]}
+var m map[any][]any = {10: [10, 3.14, 200]}
+var f map[any]func(int) int = {10: x => x}
+
+echo a
+echo m
+echo f
+`, `package main
+
+import "fmt"
+
+var a [][]interface{} = [][]interface{}{[]interface{}{10, 3.14, 200}, []interface{}{100, 200}}
+var m map[interface{}][]interface{} = map[interface{}][]interface{}{10: []interface{}{10, 3.14, 200}}
+var f map[interface{}]func(int) int = map[interface{}]func(int) int{10: func(x int) int {
+	return x
+}}
+
+func main() {
+	fmt.Println(a)
+	fmt.Println(m)
+	fmt.Println(f)
 }
 `)
 }
